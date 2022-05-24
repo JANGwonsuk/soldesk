@@ -1,0 +1,201 @@
+Parameters: 
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances. Linked to AWS Parameter
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+     CidrBlock: 10.0.0.0/16
+     EnableDnsSupport: true #내부DNS 활성화 기본적으로 활성화 되어있다.
+     EnableDnsHostnames: true #호스트네임 활성화
+     Tags:
+      - Key: Name
+        Value: VPC
+        
+  AWSIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: AWS-IGW
+          
+  AWSInternetGatewayAttachment1:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref AWSIGW
+      VpcId: !Ref VPC
+
+      
+  VPCSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.0.0.0/24
+      Tags:
+        - Key: Name
+          Value: VPC-Subnet1
+
+  VPCSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+      CidrBlock: 10.0.1.0/24
+      Tags:
+        - Key: Name
+          Value: VPC-Subnet2
+   
+  VPCRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: VPC-RT
+
+  VPCDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AWSInternetGatewayAttachment1
+    Properties:
+      RouteTableId: !Ref VPCRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref AWSIGW
+
+  VPCSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VPCRouteTable
+      SubnetId: !Ref VPCSubnet1
+
+  AWSVPC1Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VPCRouteTable
+      SubnetId: !Ref VPCSubnet2
+
+  WEBSG1: 
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: AWSVPC1 SecurityGroup
+      Tags:
+      - Key : Name
+        Value : WEB-SG1
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+     
+
+###########EC2 장비#################
+  WEBSRV1EC2: 
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-033a6a056910d1137
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: AWS-WEBSRV1
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref VPCSubnet1
+          GroupSet:
+          - !Ref WEBSG1
+          AssociatePublicIpAddress: true
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            hostname AWS-WEBSRV1
+            yum install httpd -y
+            systemctl start httpd
+            echo "<h1>Test AWS-WEBSRV1</h1>" > /var/www/html/index.html          
+
+  WEBSRV2EC2: 
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-033a6a056910d1137
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: AWS-WEBSRV2
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref VPCSubnet2
+          GroupSet:
+          - !Ref WEBSG1
+          AssociatePublicIpAddress: true
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            hostname AWS-WEBSRV2
+            yum install httpd -y
+            systemctl start httpd
+            echo "<h1>Test AWS-WEBSRV2</h1>" > /var/www/html/index.html 
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: My-ALB-TG
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      Targets:
+        - Id: !Ref WEBSRV1EC2
+          Port: 80
+        - Id: !Ref WEBSRV2EC2
+          Port: 80
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: My-ALB
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref WEBSG1
+      Subnets:
+        - !Ref VPCSubnet1
+        - !Ref VPCSubnet2
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      
+  PublicDNS: #호스팅영역구성
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: wonsuk.ml
+      HostedZoneConfig:
+        Comment: Public hosted zone For wonsuk.ml
+
+  ALBAlias: #레코드생성
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: www.wonsuk.ml
+      Type: A
+      HostedZoneId: !Ref PublicDNS #레코드를 생성하려는 호스팅 영역의 ID
+      AliasTarget: 
+        DNSName: !GetAtt ApplicationLoadBalancer.DNSName 
+        HostedZoneId: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
